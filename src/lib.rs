@@ -1,12 +1,32 @@
 extern crate hyper;
 extern crate time;
 
-use hyper::server::{Handler, Server, Request, Response};
-use std::sync::Mutex;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::time::Duration;
-use std::thread::{sleep, sleep_ms};
+use std::thread::sleep;
 use hyper::Client;
+use hyper::status::StatusCode;
+
+pub struct Log {
+    entries: Vec<Entry>
+}
+
+impl Log {
+    pub fn add(&mut self, entry: Entry) {
+        self.entries.push(entry);
+    }
+}
+
+pub enum Result {
+    Ok,
+    Anomaly(StatusCode),
+    Timeout
+}
+
+pub struct Entry {
+    pub millis: i64,
+    pub result: Result
+}
 
 pub struct Monitor<'a> {
     pub name: &'a str,
@@ -16,22 +36,33 @@ pub struct Monitor<'a> {
 }
 
 impl <'a> Monitor <'a> {
-    pub fn watch(&self, tx: Sender<&str>) {
+    pub fn watch(&self, tx: Sender<Entry>) {
         let mut client = Client::new();
         client.set_read_timeout(Some(self.timeout));
         loop {
             let moment = time::now();
-            match client.head(self.url).send() {
-                Ok(_) => {
-                    let elapsed = time::now() - moment;
-                    let std_duration = Duration::from_millis(
-                        elapsed.num_milliseconds() as u64
-                            );
-                    println!("{:?}", elapsed.num_milliseconds());
-                    tx.send("OK");
+            let result = client.head(self.url).send();
+            let elapsed = time::now() - moment;
+            match result {
+                Ok(response) => {
+                    let entry = match response.status {
+                        StatusCode::Ok => Entry {
+                            millis: elapsed.num_milliseconds(),
+                            result: Result::Ok
+                        },
+                        unexpected => Entry {
+                            millis: elapsed.num_milliseconds(),
+                            result: Result::Anomaly(unexpected)
+                        }
+                    };
+                    let _ = tx.send(entry);
                 },
                 Err(_) => {
-                    tx.send("Fail");
+                    let _ = tx.send(
+                        Entry {
+                            millis: elapsed.num_milliseconds(),
+                            result: Result::Timeout
+                        });
                 }
             }
 
